@@ -1,0 +1,6 @@
+sqlalchemy>=2.0
+torch>=2.2
+torch-geometric>=2.5
+matplotlib>=3.8
+pandas>=2.2
+pyarrow>=16.0
