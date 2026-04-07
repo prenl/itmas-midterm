@@ -7,6 +7,7 @@ class CriticAgent:
     name = "critic_agent"
 
     def run(self, state: MultiAgentState) -> MultiAgentState:
+        print(f"[agent:{self.name}] Reviewing recommendations ...")
         critic_rows: list[dict[str, object]] = []
         for recommendation in state.recommendations:
             risk_flags: list[str] = []
@@ -14,6 +15,8 @@ class CriticAgent:
             gdp_uplift = float(recommendation["estimated_gdp_uplift_pct"] or 0.0)
             value_multiplier = float(recommendation["value_multiplier_assumption"])
             development_ratio = float(recommendation["current_upgrade_to_base_ratio"] or 0.0)
+            regional_exporter_count = int(recommendation["regional_exporter_count"] or 0)
+            regional_importer_count = int(recommendation["regional_importer_count"] or 0)
 
             if partner_count <= 1:
                 risk_flags.append("narrow_partner_base")
@@ -23,6 +26,10 @@ class CriticAgent:
                 risk_flags.append("requires_strong_execution")
             if recommendation["development_status"] == "underdeveloped_export" and development_ratio >= 0.20:
                 risk_flags.append("already_partly_developed")
+            if regional_exporter_count == 0:
+                risk_flags.append("no_regional_capability_signal")
+            if regional_importer_count == 0:
+                risk_flags.append("no_regional_demand_signal")
 
             assessment = "acceptable"
             if len(risk_flags) >= 3:
@@ -53,4 +60,5 @@ class CriticAgent:
         state.coordinator_summary.append(
             f"{self.name}: reviewed {len(critic_rows)} recommendations and attached risk flags."
         )
+        print(f"[agent:{self.name}] Completed: {len(critic_rows)} rows")
         return state

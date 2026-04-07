@@ -9,12 +9,22 @@ from trade_pipeline import save_comtrade_api_keys
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run the final multi-agent export-upgrade pipeline for Kazakhstan."
+        description="Run the final multi-agent export-upgrade pipeline."
+    )
+    parser.add_argument(
+        "--target-country",
+        default="KAZ",
+        help="ISO3 code of the country for which recommendations are generated.",
+    )
+    parser.add_argument(
+        "--regional-countries",
+        default="",
+        help="Optional comma-separated ISO3 list for regional comparison. If empty, all reporters found in the data are used.",
     )
     parser.add_argument(
         "--comtrade-dir",
-        default="data/comtrade_2024",
-        help="Directory containing UN Comtrade exports for Kazakhstan HS6 annual exports.",
+        default="data/comtrade",
+        help="Directory containing UN Comtrade HS6 trade files.",
     )
     parser.add_argument(
         "--gravity-file",
@@ -52,9 +62,27 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     save_comtrade_api_keys(args.comtrade_primary_key, args.comtrade_secondary_key)
+    target_country_iso3 = args.target_country.strip().upper()
+    regional_countries = {
+        code.strip().upper() for code in args.regional_countries.split(",") if code.strip()
+    }
+    if regional_countries and target_country_iso3 not in regional_countries:
+        regional_countries.add(target_country_iso3)
+
+    print("[run_multi_agent] Starting run")
+    print(f"[run_multi_agent] target_country={target_country_iso3}")
+    print(f"[run_multi_agent] comtrade_dir={args.comtrade_dir}")
+    print(f"[run_multi_agent] gravity_file={args.gravity_file}")
+    print(f"[run_multi_agent] output_dir={args.output_dir}")
+    print(
+        "[run_multi_agent] regional_countries="
+        + (", ".join(sorted(regional_countries)) if regional_countries else "all reporters in dataset")
+    )
 
     coordinator = MultiAgentCoordinator()
     state = coordinator.run(
+        target_country_iso3=target_country_iso3,
+        allowed_reporters=regional_countries,
         comtrade_dir=Path(args.comtrade_dir),
         gravity_file=Path(args.gravity_file),
         gravity_countries_file=Path(args.gravity_countries_file),
@@ -67,8 +95,17 @@ def main() -> None:
     top_rec = state.recommendations[0] if state.recommendations else None
     top_critic = state.critic_rows[0] if state.critic_rows else None
 
-    print("Kazakhstan export-upgrade multi-agent system")
+    print(f"{state.target_country_name} export-upgrade multi-agent system")
     print(f"Agents executed: 4 specialized agents + coordinator")
+    print(f"Target country: {state.target_country_name} ({state.target_country_iso3})")
+    print(
+        f"Regional reporters considered: {len(state.regional_reporters)}"
+        + (
+            f" | user filter: {', '.join(sorted(regional_countries))}"
+            if regional_countries
+            else " | user filter: all reporters in dataset"
+        )
+    )
     print(f"Trade rows loaded: {len(state.trade_rows)}")
     print(f"Distinct HS6 exports: {len(state.export_base)}")
     print(f"Distinct export partners: {len(state.partners)}")

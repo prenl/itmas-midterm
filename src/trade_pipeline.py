@@ -71,6 +71,7 @@ class TradeRow:
     net_weight_kg: float | None
     quantity: float | None
     qty_unit: str
+    flow: str
 
 
 def _normalize_header(value: str) -> str:
@@ -110,7 +111,18 @@ def _is_hs6_code(code: str) -> bool:
     return len(code) == 6 and code.isdigit()
 
 
-def load_comtrade_exports_from_dir(comtrade_dir: Path) -> list[TradeRow]:
+def _normalize_flow(raw: str | None) -> str | None:
+    text = str(raw or "").strip().lower()
+    if not text:
+        return None
+    if text in {"x", "2", "e", "export", "exports"}:
+        return "export"
+    if text in {"m", "1", "i", "import", "imports"}:
+        return "import"
+    return None
+
+
+def load_comtrade_trade_rows_from_dir(comtrade_dir: Path) -> list[TradeRow]:
     if not comtrade_dir.exists():
         raise FileNotFoundError(
             f"Comtrade directory not found: {comtrade_dir}. "
@@ -125,22 +137,31 @@ def load_comtrade_exports_from_dir(comtrade_dir: Path) -> list[TradeRow]:
         + sorted(comtrade_dir.glob("*.txt.gz"))
         + sorted(comtrade_dir.glob("*.gz"))
     )
-    kazakhstan_only = [path for path in files if "country_398" in path.name.lower()]
-    if kazakhstan_only:
-        files = kazakhstan_only
     if not files:
         raise FileNotFoundError(
             f"No CSV or Parquet files found in {comtrade_dir}. "
-            "Export Kazakhstan HS6 annual exports from UN Comtrade and place the files there."
+            "Export UN Comtrade trade files and place them there."
         )
 
+    print(f"[trade_pipeline] Comtrade files discovered: {len(files)} in {comtrade_dir}")
+
     for csv_path in files:
+        before_count = len(rows)
+        print(f"[trade_pipeline] Reading {csv_path.name} ...")
         if _looks_like_gzip_text(csv_path):
-            rows.extend(_load_comtrade_exports_from_gzip_tsv(csv_path))
+            rows.extend(_load_comtrade_trade_rows_from_gzip_tsv(csv_path))
+            print(
+                f"[trade_pipeline] Finished {csv_path.name}: +{len(rows) - before_count} rows "
+                f"(cumulative {len(rows)})"
+            )
             continue
 
         if csv_path.suffix.lower() in {".parquet", ".pq"}:
-            rows.extend(_load_comtrade_exports_from_parquet(csv_path))
+            rows.extend(_load_comtrade_trade_rows_from_parquet(csv_path))
+            print(
+                f"[trade_pipeline] Finished {csv_path.name}: +{len(rows) - before_count} rows "
+                f"(cumulative {len(rows)})"
+            )
             continue
 
         with csv_path.open(newline="", encoding="utf-8-sig") as handle:
@@ -166,17 +187,13 @@ def load_comtrade_exports_from_dir(comtrade_dir: Path) -> list[TradeRow]:
                 if year not in TARGET_YEARS:
                     continue
 
-                flow_text = ""
-                if columns["flow"] is not None:
-                    flow_text = (record.get(columns["flow"]) or "").strip().lower()
-                if flow_text and "export" not in flow_text:
+                flow = _normalize_flow(record.get(columns["flow"])) if columns["flow"] is not None else "export"
+                if flow is None:
                     continue
 
                 reporter_iso3 = ""
                 if columns["reporter_iso3"] is not None:
                     reporter_iso3 = (record.get(columns["reporter_iso3"]) or "").strip().upper()
-                if reporter_iso3 and reporter_iso3 != "KAZ":
-                    continue
 
                 partner_iso3 = ""
                 if columns["partner_iso3"] is not None:
@@ -193,10 +210,10 @@ def load_comtrade_exports_from_dir(comtrade_dir: Path) -> list[TradeRow]:
                 rows.append(
                     TradeRow(
                         year=year,
-                        reporter_iso3="KAZ",
-                        reporter=(record.get(columns["reporter"]) or "Kazakhstan").strip()
+                        reporter_iso3=reporter_iso3,
+                        reporter=(record.get(columns["reporter"]) or reporter_iso3 or "Unknown reporter").strip()
                         if columns["reporter"] is not None
-                        else "Kazakhstan",
+                        else (reporter_iso3 or "Unknown reporter"),
                         partner_iso3=partner_iso3,
                         partner=(record.get(columns["partner"]) or "").strip(),
                         cmd_code=cmd_code,
@@ -213,11 +230,18 @@ def load_comtrade_exports_from_dir(comtrade_dir: Path) -> list[TradeRow]:
                         qty_unit=(record.get(columns["qty_unit"]) or "").strip()
                         if columns["qty_unit"] is not None
                         else "",
+                        flow=flow,
                     )
                 )
 
+        print(
+            f"[trade_pipeline] Finished {csv_path.name}: +{len(rows) - before_count} rows "
+            f"(cumulative {len(rows)})"
+        )
+
     if not rows:
-        raise ValueError("No Kazakhstan export rows for 2020-2025 were found in the supplied Comtrade CSV files.")
+        raise ValueError("No HS6 trade rows for 2020-2025 were found in the supplied Comtrade files.")
+    print(f"[trade_pipeline] Total loaded trade rows: {len(rows)}")
     return rows
 
 
@@ -231,7 +255,7 @@ def _looks_like_gzip_text(path: Path) -> bool:
         return False
 
 
-def _load_comtrade_exports_from_gzip_tsv(path: Path) -> list[TradeRow]:
+def _load_comtrade_trade_rows_from_gzip_tsv(path: Path) -> list[TradeRow]:
     rows: list[TradeRow] = []
     with gzip.open(path, "rt", encoding="utf-8", errors="ignore") as handle:
         reader = csv.DictReader(handle, delimiter="\t")
@@ -245,15 +269,13 @@ def _load_comtrade_exports_from_gzip_tsv(path: Path) -> list[TradeRow]:
                 continue
 
             reporter_code = str(record.get("reporterCode") or "").strip()
-            if reporter_code and reporter_code != "398":
-                continue
 
-            flow_code = str(record.get("flowCode") or "").strip().upper()
-            if flow_code not in {"X", "2", "E"}:
+            flow = _normalize_flow(record.get("flowCode"))
+            if flow is None:
                 continue
 
             classification_code = str(record.get("classificationCode") or "").strip().upper()
-            if classification_code not in {"H6", "HS", "HS6"}:
+            if classification_code and not classification_code.startswith("H"):
                 continue
 
             cmd_code = str(record.get("cmdCode") or "").strip()
@@ -276,8 +298,8 @@ def _load_comtrade_exports_from_gzip_tsv(path: Path) -> list[TradeRow]:
             rows.append(
                 TradeRow(
                     year=year,
-                    reporter_iso3="KAZ",
-                    reporter="Kazakhstan",
+                    reporter_iso3=reporter_code,
+                    reporter=reporter_code or "Unknown reporter",
                     partner_iso3=partner_iso3,
                     partner=partner_code or "Unknown partner",
                     cmd_code=cmd_code,
@@ -286,6 +308,7 @@ def _load_comtrade_exports_from_gzip_tsv(path: Path) -> list[TradeRow]:
                     net_weight_kg=_to_float(record.get("netWgt")),
                     quantity=_to_float(record.get("qty")),
                     qty_unit=str(record.get("qtyUnitCode") or "").strip(),
+                    flow=flow,
                 )
             )
     return rows
@@ -307,7 +330,7 @@ def load_cepii_country_reference(countries_path: Path) -> tuple[dict[str, str], 
     return iso3_by_numeric, name_by_iso3
 
 
-def _load_comtrade_exports_from_parquet(parquet_path: Path) -> list[TradeRow]:
+def _load_comtrade_trade_rows_from_parquet(parquet_path: Path) -> list[TradeRow]:
     frame = pd.read_parquet(parquet_path)
     if frame.empty:
         return []
@@ -337,17 +360,13 @@ def _load_comtrade_exports_from_parquet(parquet_path: Path) -> list[TradeRow]:
         if year not in TARGET_YEARS:
             continue
 
-        flow_text = ""
-        if columns["flow"] is not None:
-            flow_text = str(record.get(columns["flow"]) or "").strip().lower()
-        if flow_text and "export" not in flow_text:
+        flow = _normalize_flow(record.get(columns["flow"])) if columns["flow"] is not None else "export"
+        if flow is None:
             continue
 
         reporter_iso3 = ""
         if columns["reporter_iso3"] is not None:
             reporter_iso3 = str(record.get(columns["reporter_iso3"]) or "").strip().upper()
-        if reporter_iso3 and reporter_iso3 != "KAZ":
-            continue
 
         partner_iso3 = ""
         if columns["partner_iso3"] is not None:
@@ -364,10 +383,10 @@ def _load_comtrade_exports_from_parquet(parquet_path: Path) -> list[TradeRow]:
         rows.append(
             TradeRow(
                 year=year,
-                reporter_iso3="KAZ",
-                reporter=str(record.get(columns["reporter"]) or "Kazakhstan").strip()
+                reporter_iso3=reporter_iso3,
+                reporter=str(record.get(columns["reporter"]) or reporter_iso3 or "Unknown reporter").strip()
                 if columns["reporter"] is not None
-                else "Kazakhstan",
+                else (reporter_iso3 or "Unknown reporter"),
                 partner_iso3=partner_iso3,
                 partner=str(record.get(columns["partner"]) or "").strip(),
                 cmd_code=cmd_code,
@@ -384,6 +403,7 @@ def _load_comtrade_exports_from_parquet(parquet_path: Path) -> list[TradeRow]:
                 qty_unit=str(record.get(columns["qty_unit"]) or "").strip()
                 if columns["qty_unit"] is not None
                 else "",
+                flow=flow,
             )
         )
 
@@ -436,12 +456,21 @@ def fetch_world_bank_indicators(country_iso3_list: set[str]) -> dict[str, dict[i
         country_iso3: {} for country_iso3 in sorted(country_iso3_list)
     }
     country_codes = sorted(country_iso3_list)
+    print(
+        f"[trade_pipeline] Fetching World Bank indicators for {len(country_codes)} countries: "
+        f"{', '.join(country_codes)}"
+    )
     for feature_name, indicator in WORLD_BANK_INDICATORS.items():
+        print(f"[trade_pipeline] Indicator {feature_name} ({indicator})")
         for start in range(0, len(country_codes), WORLD_BANK_BATCH_SIZE):
             batch = country_codes[start:start + WORLD_BANK_BATCH_SIZE]
             batch_key = ";".join(batch)
             params = urlencode({"format": "json", "per_page": "20000"})
             url = WORLD_BANK_BASE.format(country=batch_key, indicator=indicator) + "?" + params
+            print(
+                f"[trade_pipeline]   batch {start // WORLD_BANK_BATCH_SIZE + 1}: "
+                f"{', '.join(batch)}"
+            )
             with urlopen(url) as response:
                 payload = json.loads(response.read().decode("utf-8"))
             observations = payload[1] if isinstance(payload, list) and len(payload) > 1 else []
@@ -459,6 +488,8 @@ def fetch_world_bank_indicators(country_iso3_list: set[str]) -> dict[str, dict[i
                     continue
                 country_year = result[country_iso3].setdefault(year, {})
                 country_year[feature_name] = item.get("value")
+        print(f"[trade_pipeline] Completed indicator {feature_name}")
+    print("[trade_pipeline] World Bank fetch completed")
     return result
 
 
@@ -470,29 +501,44 @@ def enrich_trade_rows_with_country_reference(
 ) -> list[TradeRow]:
     enriched: list[TradeRow] = []
     for row in trade_rows:
+        reporter_code = row.reporter_iso3.strip()
         partner_code = row.partner.strip()
-        resolved_iso3 = row.partner_iso3
-        resolved_name = row.partner
+        resolved_reporter_iso3 = row.reporter_iso3
+        resolved_reporter_name = row.reporter
+        resolved_partner_iso3 = row.partner_iso3
+        resolved_partner_name = row.partner
+
+        if reporter_code in iso3_by_numeric:
+            resolved_reporter_iso3 = iso3_by_numeric[reporter_code]
+            resolved_reporter_name = name_by_iso3.get(resolved_reporter_iso3, resolved_reporter_iso3)
+        elif len(reporter_code) == 3 and reporter_code.isalpha():
+            resolved_reporter_iso3 = reporter_code.upper()
+            resolved_reporter_name = name_by_iso3.get(resolved_reporter_iso3, row.reporter or resolved_reporter_iso3)
+
         if partner_code in iso3_by_numeric:
-            resolved_iso3 = iso3_by_numeric[partner_code]
-            resolved_name = name_by_iso3.get(resolved_iso3, resolved_iso3)
+            resolved_partner_iso3 = iso3_by_numeric[partner_code]
+            resolved_partner_name = name_by_iso3.get(resolved_partner_iso3, resolved_partner_iso3)
         elif partner_code == "0":
-            resolved_iso3 = "WLD"
-            resolved_name = "World"
+            resolved_partner_iso3 = "WLD"
+            resolved_partner_name = "World"
+        elif len(row.partner_iso3) == 3 and row.partner_iso3.isalpha():
+            resolved_partner_iso3 = row.partner_iso3.upper()
+            resolved_partner_name = name_by_iso3.get(resolved_partner_iso3, row.partner or resolved_partner_iso3)
 
         enriched.append(
             TradeRow(
                 year=row.year,
-                reporter_iso3=row.reporter_iso3,
-                reporter=row.reporter,
-                partner_iso3=resolved_iso3,
-                partner=resolved_name,
+                reporter_iso3=resolved_reporter_iso3,
+                reporter=resolved_reporter_name,
+                partner_iso3=resolved_partner_iso3,
+                partner=resolved_partner_name,
                 cmd_code=row.cmd_code,
                 cmd_desc=row.cmd_desc,
                 trade_value_usd=row.trade_value_usd,
                 net_weight_kg=row.net_weight_kg,
                 quantity=row.quantity,
                 qty_unit=row.qty_unit,
+                flow=row.flow,
             )
         )
     return enriched
@@ -501,6 +547,8 @@ def enrich_trade_rows_with_country_reference(
 def summarize_export_base(trade_rows: list[TradeRow]) -> list[dict[str, object]]:
     by_code: dict[str, dict[str, object]] = {}
     for row in trade_rows:
+        if row.flow != "export":
+            continue
         item = by_code.setdefault(
             row.cmd_code,
             {
@@ -538,23 +586,36 @@ def summarize_export_base(trade_rows: list[TradeRow]) -> list[dict[str, object]]
 
 
 def build_recommendations(
+    *,
+    target_country_iso3: str,
+    target_country_name: str,
     trade_rows: list[TradeRow],
     upgrade_paths: list[dict[str, str]],
     world_bank: dict[str, dict[int, dict[str, float | None]]],
     gravity_by_partner: dict[str, dict[str, float | str]],
 ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
-    latest_kaz_gdp = None
+    latest_target_gdp = None
     for year in sorted(TARGET_YEARS, reverse=True):
-        latest_kaz_gdp = world_bank.get("KAZ", {}).get(year, {}).get("gdp_current_usd")
-        if latest_kaz_gdp:
+        latest_target_gdp = world_bank.get(target_country_iso3, {}).get(year, {}).get("gdp_current_usd")
+        if latest_target_gdp:
             break
 
-    base_summary = summarize_export_base(trade_rows)
+    target_export_rows = [
+        row for row in trade_rows if row.reporter_iso3 == target_country_iso3 and row.flow == "export"
+    ]
+    base_summary = summarize_export_base(target_export_rows)
     summary_by_code = {row["cmd_code"]: row for row in base_summary}
 
-    partner_rows_by_code: dict[str, list[TradeRow]] = defaultdict(list)
+    target_partner_rows_by_code: dict[str, list[TradeRow]] = defaultdict(list)
+    regional_upgrade_exports: dict[str, list[TradeRow]] = defaultdict(list)
+    regional_upgrade_imports: dict[str, list[TradeRow]] = defaultdict(list)
     for row in trade_rows:
-        partner_rows_by_code[row.cmd_code].append(row)
+        if row.reporter_iso3 == target_country_iso3 and row.flow == "export":
+            target_partner_rows_by_code[row.cmd_code].append(row)
+        elif row.reporter_iso3 != target_country_iso3 and row.flow == "export":
+            regional_upgrade_exports[row.cmd_code].append(row)
+        elif row.reporter_iso3 != target_country_iso3 and row.flow == "import":
+            regional_upgrade_imports[row.cmd_code].append(row)
 
     recs: list[dict[str, object]] = []
     partner_csv_rows: list[dict[str, object]] = []
@@ -577,7 +638,7 @@ def build_recommendations(
         if existing_upgrade is not None and development_ratio >= 0.35:
             continue
 
-        source_rows = partner_rows_by_code[base_code]
+        source_rows = target_partner_rows_by_code[base_code]
         partner_scores = []
         aggregated_partner_rows: dict[str, dict[str, object]] = {}
         for row in source_rows:
@@ -593,6 +654,28 @@ def build_recommendations(
                 },
             )
             item["base_trade_value_usd"] = float(item["base_trade_value_usd"]) + row.trade_value_usd
+
+        regional_export_rows = regional_upgrade_exports.get(upgrade_code, [])
+        regional_import_rows = regional_upgrade_imports.get(upgrade_code, [])
+        regional_exporters = {row.reporter_iso3 for row in regional_export_rows if row.reporter_iso3}
+        regional_importers = {row.reporter_iso3 for row in regional_import_rows if row.reporter_iso3}
+        regional_export_value = sum(row.trade_value_usd for row in regional_export_rows)
+        regional_import_value = sum(row.trade_value_usd for row in regional_import_rows)
+
+        for row in regional_import_rows:
+            market_iso3 = row.reporter_iso3
+            if not market_iso3:
+                continue
+            item = aggregated_partner_rows.setdefault(
+                market_iso3,
+                {
+                    "partner_iso3": market_iso3,
+                    "partner_name": row.reporter,
+                    "base_trade_value_usd": 0.0,
+                    "regional_import_value_usd": 0.0,
+                },
+            )
+            item["regional_import_value_usd"] = float(item.get("regional_import_value_usd", 0.0)) + row.trade_value_usd
 
         for partner_iso3, aggregated in aggregated_partner_rows.items():
             yearly_features = world_bank.get(partner_iso3, {})
@@ -610,12 +693,14 @@ def build_recommendations(
             dist_km = gravity.get("dist_km") or 5000.0
             contig = gravity.get("contig") or 0
             lang = gravity.get("comlang_off") or 0
+            import_demand_value = float(aggregated.get("regional_import_value_usd", 0.0) or 0.0)
             score = (
                 math.log10(max(float(gdp or 1.0), 1.0)) * 0.55
                 + float(gdp_growth or 0.0) * 0.15
                 + (1.0 if contig else 0.0) * 0.15
                 + (1.0 if lang else 0.0) * 0.05
                 + (1.0 / math.log10(max(float(dist_km), 10.0))) * 0.10
+                + math.log10(max(import_demand_value, 1.0)) * 0.12
             )
             partner_scores.append(
                 {
@@ -625,6 +710,7 @@ def build_recommendations(
                     "partner_score": score,
                     "partner_gdp_usd": gdp,
                     "partner_gdp_growth_pct": gdp_growth,
+                    "regional_import_value_usd": round(import_demand_value, 2),
                     "distance_km": dist_km,
                     "shared_border": contig,
                     "common_language": lang,
@@ -644,13 +730,17 @@ def build_recommendations(
             convertible_share = 0.08 if stage_gap <= 1 else 0.05
 
         export_uplift_usd = base_trade_value * convertible_share * (value_multiplier - 1.0)
-        gdp_uplift_pct = (export_uplift_usd / latest_kaz_gdp * 100.0) if latest_kaz_gdp else None
+        gdp_uplift_pct = (export_uplift_usd / latest_target_gdp * 100.0) if latest_target_gdp else None
         opportunity_score = (
             math.log10(max(base_trade_value, 1.0)) * 0.42
             + average_partner_score * 0.28
             + value_multiplier * 0.20
             + (2.5 - stage_gap) * 0.10
             + (1.0 - min(development_ratio, 1.0)) * 0.12
+            + math.log10(max(regional_export_value, 1.0)) * 0.07
+            + math.log10(max(regional_import_value, 1.0)) * 0.09
+            + min(len(regional_exporters), 10) * 0.03
+            + min(len(regional_importers), 10) * 0.04
         )
 
         recs.append(
@@ -668,13 +758,17 @@ def build_recommendations(
                 "base_avg_unit_value_usd_per_kg": base["avg_unit_value_usd_per_kg"],
                 "value_multiplier_assumption": value_multiplier,
                 "convertible_share_assumption": convertible_share,
+                "regional_exporter_count": len(regional_exporters),
+                "regional_export_value_usd": round(regional_export_value, 2),
+                "regional_importer_count": len(regional_importers),
+                "regional_import_value_usd": round(regional_import_value, 2),
                 "estimated_export_uplift_usd": round(export_uplift_usd, 2),
                 "estimated_gdp_uplift_pct": round(gdp_uplift_pct, 6) if gdp_uplift_pct is not None else None,
                 "opportunity_score": round(opportunity_score, 6),
                 "top_target_markets": ", ".join(item["partner_name"] for item in top_partners),
                 "short_conclusion": (
                     f"Moving from {base_code} to {upgrade_code} looks realistic given "
-                    f"Kazakhstan's existing export base and current partner mix."
+                    f"{target_country_name}'s export base, regional capability, and nearby demand."
                     if existing_upgrade is None
                     else f"{upgrade_code} is already exported, but still looks underdeveloped relative to {base_code}."
                 ),
@@ -733,6 +827,8 @@ def render_charts(
     export_base_rows: list[dict[str, object]],
     recommendations: list[dict[str, object]],
     charts_dir: Path,
+    *,
+    target_country_name: str = "Kazakhstan",
 ) -> None:
     import matplotlib.pyplot as plt
 
@@ -744,7 +840,7 @@ def render_charts(
         labels = [_wrap_label(str(row["cmd_code"]), str(row["cmd_desc"])) for row in top_exports]
         values = [float(row["trade_value_usd"]) / 1_000_000 for row in top_exports]
         plt.bar(labels, values, color="#1f77b4")
-        plt.title("Kazakhstan top HS6 exports, 2024")
+        plt.title(f"{target_country_name} top HS6 exports")
         plt.ylabel("USD million")
         plt.xlabel("HS6 product")
         plt.xticks(rotation=35, ha="right", fontsize=8)
@@ -770,7 +866,7 @@ def render_charts(
         labels = [_wrap_label(str(row["upgrade_hs6"]), str(row["upgrade_label"])) for row in top_recs]
         values = [float(row["estimated_gdp_uplift_pct"] or 0.0) for row in top_recs]
         plt.bar(labels, values, color="#2ca02c")
-        plt.title("Estimated Kazakhstan GDP uplift by recommended HS6 upgrade")
+        plt.title(f"Estimated {target_country_name} GDP uplift by recommended HS6 upgrade")
         plt.ylabel("GDP uplift, %")
         plt.xlabel("Recommended upgrade")
         plt.xticks(rotation=35, ha="right", fontsize=8)
