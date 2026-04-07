@@ -4,20 +4,27 @@ import argparse
 from pathlib import Path
 
 from agents import MultiAgentCoordinator
-from mvp_data_pipeline import save_comtrade_api_keys
+from trade_pipeline import save_comtrade_api_keys
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run the Kazakhstan export-upgrade multi-agent MVP.")
+    parser = argparse.ArgumentParser(
+        description="Run the final multi-agent export-upgrade pipeline for Kazakhstan."
+    )
     parser.add_argument(
         "--comtrade-dir",
-        default="data/comtrade",
-        help="Directory containing UN Comtrade CSV or Parquet exports for Kazakhstan HS6 annual exports.",
+        default="data/comtrade_2024",
+        help="Directory containing UN Comtrade exports for Kazakhstan HS6 annual exports.",
     )
     parser.add_argument(
         "--gravity-file",
         default="Gravity_csv_V202211/Gravity_V202211.csv",
         help="Path to CEPII Gravity CSV.",
+    )
+    parser.add_argument(
+        "--gravity-countries-file",
+        default="Gravity_csv_V202211/Countries_V202211.csv",
+        help="Path to CEPII countries reference CSV.",
     )
     parser.add_argument(
         "--upgrade-paths",
@@ -26,7 +33,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--output-dir",
-        default="outputs/multi_agent",
+        default="outputs/multi_agent_2024_hs6_underdeveloped",
         help="Directory for generated CSV outputs, charts, and coordinator summary.",
     )
     parser.add_argument(
@@ -50,6 +57,7 @@ def main() -> None:
     state = coordinator.run(
         comtrade_dir=Path(args.comtrade_dir),
         gravity_file=Path(args.gravity_file),
+        gravity_countries_file=Path(args.gravity_countries_file),
         upgrade_paths_file=Path(args.upgrade_paths),
         output_dir=Path(args.output_dir),
     )
@@ -59,12 +67,13 @@ def main() -> None:
     top_rec = state.recommendations[0] if state.recommendations else None
     top_critic = state.critic_rows[0] if state.critic_rows else None
 
-    print("Kazakhstan export-upgrade multi-agent MVP")
+    print("Kazakhstan export-upgrade multi-agent system")
     print(f"Agents executed: 4 specialized agents + coordinator")
     print(f"Trade rows loaded: {len(state.trade_rows)}")
     print(f"Distinct HS6 exports: {len(state.export_base)}")
     print(f"Distinct export partners: {len(state.partners)}")
     print(f"Total export value in sample: USD {total_exports:,.0f}")
+    print(f"Recommendations generated: {len(state.recommendations)}")
     if top_export is not None:
         print(
             f"Top current export: {top_export['cmd_code']} | {top_export['cmd_desc']} | "

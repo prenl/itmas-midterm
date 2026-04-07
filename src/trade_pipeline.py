@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import gzip
 import json
 import math
 import os
@@ -10,7 +11,6 @@ from pathlib import Path
 from urllib.parse import urlencode
 from urllib.request import urlopen
 
-import matplotlib.pyplot as plt
 import pandas as pd
 
 
@@ -22,6 +22,26 @@ WORLD_BANK_INDICATORS = {
     "trade_share_gdp_pct": "NE.TRD.GNFS.ZS",
 }
 TARGET_YEARS = {2020, 2021, 2022, 2023, 2024, 2025}
+WORLD_BANK_BATCH_SIZE = 40
+TOP_EXPORT_CHART_COUNT = 15
+TOP_RECOMMENDATION_CHART_COUNT = 15
+HS6_REFERENCE_LABELS = {
+    "100199": "Other wheat and meslin",
+    "110100": "Wheat or meslin flour",
+    "260300": "Copper ores and concentrates",
+    "270900": "Crude petroleum oils and oils from bituminous minerals",
+    "271019": "Medium oils and petroleum preparations, nes",
+    "271121": "Natural gas in gaseous state",
+    "281820": "Aluminium oxide",
+    "284410": "Uranium enriched in U235 and related compounds",
+    "710691": "Silver, unwrought",
+    "720241": "Ferro-chromium containing more than 4 percent carbon",
+    "740311": "Refined copper cathodes and sections of cathodes",
+    "740319": "Refined copper, unwrought, other",
+    "760110": "Unwrought aluminium, not alloyed",
+    "790111": "Zinc, not alloyed, containing at least 99.99 percent zinc",
+    "880240": "Aeroplanes and other aircraft exceeding 15000 kg",
+}
 HEADER_ALIASES = {
     "year": ["year", "period", "refyear"],
     "reporter_iso3": ["reporterisocodeisoalpha3", "reporteriso", "reportercodeisoalpha3"],
@@ -85,6 +105,11 @@ def _to_int(raw: str | None) -> int | None:
     return int(value)
 
 
+def _is_hs6_code(code: str) -> bool:
+    code = code.strip()
+    return len(code) == 6 and code.isdigit()
+
+
 def load_comtrade_exports_from_dir(comtrade_dir: Path) -> list[TradeRow]:
     if not comtrade_dir.exists():
         raise FileNotFoundError(
@@ -93,7 +118,16 @@ def load_comtrade_exports_from_dir(comtrade_dir: Path) -> list[TradeRow]:
         )
 
     rows: list[TradeRow] = []
-    files = sorted(comtrade_dir.glob("*.csv")) + sorted(comtrade_dir.glob("*.parquet")) + sorted(comtrade_dir.glob("*.pq"))
+    files = (
+        sorted(comtrade_dir.glob("*.csv"))
+        + sorted(comtrade_dir.glob("*.parquet"))
+        + sorted(comtrade_dir.glob("*.pq"))
+        + sorted(comtrade_dir.glob("*.txt.gz"))
+        + sorted(comtrade_dir.glob("*.gz"))
+    )
+    kazakhstan_only = [path for path in files if "country_398" in path.name.lower()]
+    if kazakhstan_only:
+        files = kazakhstan_only
     if not files:
         raise FileNotFoundError(
             f"No CSV or Parquet files found in {comtrade_dir}. "
@@ -101,6 +135,10 @@ def load_comtrade_exports_from_dir(comtrade_dir: Path) -> list[TradeRow]:
         )
 
     for csv_path in files:
+        if _looks_like_gzip_text(csv_path):
+            rows.extend(_load_comtrade_exports_from_gzip_tsv(csv_path))
+            continue
+
         if csv_path.suffix.lower() in {".parquet", ".pq"}:
             rows.extend(_load_comtrade_exports_from_parquet(csv_path))
             continue
@@ -145,7 +183,7 @@ def load_comtrade_exports_from_dir(comtrade_dir: Path) -> list[TradeRow]:
                     partner_iso3 = (record.get(columns["partner_iso3"]) or "").strip().upper()
 
                 cmd_code = (record.get(columns["cmd_code"]) or "").strip()
-                if not cmd_code or cmd_code.upper() == "TOTAL":
+                if not cmd_code or cmd_code.upper() == "TOTAL" or not _is_hs6_code(cmd_code):
                     continue
 
                 trade_value = _to_float(record.get(columns["trade_value_usd"]))
@@ -181,6 +219,92 @@ def load_comtrade_exports_from_dir(comtrade_dir: Path) -> list[TradeRow]:
     if not rows:
         raise ValueError("No Kazakhstan export rows for 2020-2025 were found in the supplied Comtrade CSV files.")
     return rows
+
+
+def _looks_like_gzip_text(path: Path) -> bool:
+    if not path.is_file():
+        return False
+    try:
+        with path.open("rb") as handle:
+            return handle.read(2) == b"\x1f\x8b"
+    except OSError:
+        return False
+
+
+def _load_comtrade_exports_from_gzip_tsv(path: Path) -> list[TradeRow]:
+    rows: list[TradeRow] = []
+    with gzip.open(path, "rt", encoding="utf-8", errors="ignore") as handle:
+        reader = csv.DictReader(handle, delimiter="\t")
+        fieldnames = reader.fieldnames or []
+        if not fieldnames:
+            return rows
+
+        for record in reader:
+            year = _to_int(record.get("refYear") or record.get("period"))
+            if year not in TARGET_YEARS:
+                continue
+
+            reporter_code = str(record.get("reporterCode") or "").strip()
+            if reporter_code and reporter_code != "398":
+                continue
+
+            flow_code = str(record.get("flowCode") or "").strip().upper()
+            if flow_code not in {"X", "2", "E"}:
+                continue
+
+            classification_code = str(record.get("classificationCode") or "").strip().upper()
+            if classification_code not in {"H6", "HS", "HS6"}:
+                continue
+
+            cmd_code = str(record.get("cmdCode") or "").strip()
+            if not cmd_code or cmd_code.upper() == "TOTAL" or not _is_hs6_code(cmd_code):
+                continue
+
+            is_aggregate = str(record.get("isAggregate") or "").strip()
+            if is_aggregate == "1":
+                continue
+
+            trade_value = _to_float(record.get("primaryValue") or record.get("FOBValue") or record.get("CIFValue"))
+            if trade_value is None or trade_value <= 0:
+                continue
+
+            partner_iso3 = ""
+            partner_code = str(record.get("partnerCode") or "").strip()
+            if partner_code == "0":
+                partner_iso3 = "WLD"
+
+            rows.append(
+                TradeRow(
+                    year=year,
+                    reporter_iso3="KAZ",
+                    reporter="Kazakhstan",
+                    partner_iso3=partner_iso3,
+                    partner=partner_code or "Unknown partner",
+                    cmd_code=cmd_code,
+                    cmd_desc=cmd_code,
+                    trade_value_usd=trade_value,
+                    net_weight_kg=_to_float(record.get("netWgt")),
+                    quantity=_to_float(record.get("qty")),
+                    qty_unit=str(record.get("qtyUnitCode") or "").strip(),
+                )
+            )
+    return rows
+
+
+def load_cepii_country_reference(countries_path: Path) -> tuple[dict[str, str], dict[str, str]]:
+    iso3_by_numeric: dict[str, str] = {}
+    name_by_iso3: dict[str, str] = {}
+    with countries_path.open(newline="", encoding="utf-8-sig") as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            iso3 = (row.get("iso3") or "").strip().upper()
+            iso3num = (row.get("iso3num") or "").strip()
+            country_name = (row.get("country") or row.get("countrylong") or iso3).strip()
+            if iso3 and iso3num and iso3num not in iso3_by_numeric:
+                iso3_by_numeric[iso3num] = iso3
+            if iso3 and iso3 not in name_by_iso3:
+                name_by_iso3[iso3] = country_name
+    return iso3_by_numeric, name_by_iso3
 
 
 def _load_comtrade_exports_from_parquet(parquet_path: Path) -> list[TradeRow]:
@@ -230,7 +354,7 @@ def _load_comtrade_exports_from_parquet(parquet_path: Path) -> list[TradeRow]:
             partner_iso3 = str(record.get(columns["partner_iso3"]) or "").strip().upper()
 
         cmd_code = str(record.get(columns["cmd_code"]) or "").strip()
-        if not cmd_code or cmd_code.upper() == "TOTAL":
+        if not cmd_code or cmd_code.upper() == "TOTAL" or not _is_hs6_code(cmd_code):
             continue
 
         trade_value = _to_float(record.get(columns["trade_value_usd"]))
@@ -308,25 +432,70 @@ def load_cepii_gravity(gravity_path: Path, reporter_iso3: str, partners: set[str
 
 
 def fetch_world_bank_indicators(country_iso3_list: set[str]) -> dict[str, dict[int, dict[str, float | None]]]:
-    result: dict[str, dict[int, dict[str, float | None]]] = {}
-    for country_iso3 in sorted(country_iso3_list):
-        per_year: dict[int, dict[str, float | None]] = defaultdict(dict)
-        for feature_name, indicator in WORLD_BANK_INDICATORS.items():
-            params = urlencode({"format": "json", "per_page": "100"})
-            url = WORLD_BANK_BASE.format(country=country_iso3, indicator=indicator) + "?" + params
+    result: dict[str, dict[int, dict[str, float | None]]] = {
+        country_iso3: {} for country_iso3 in sorted(country_iso3_list)
+    }
+    country_codes = sorted(country_iso3_list)
+    for feature_name, indicator in WORLD_BANK_INDICATORS.items():
+        for start in range(0, len(country_codes), WORLD_BANK_BATCH_SIZE):
+            batch = country_codes[start:start + WORLD_BANK_BATCH_SIZE]
+            batch_key = ";".join(batch)
+            params = urlencode({"format": "json", "per_page": "20000"})
+            url = WORLD_BANK_BASE.format(country=batch_key, indicator=indicator) + "?" + params
             with urlopen(url) as response:
                 payload = json.loads(response.read().decode("utf-8"))
             observations = payload[1] if isinstance(payload, list) and len(payload) > 1 else []
+            if observations is None:
+                observations = []
             for item in observations:
+                country_iso3 = item.get("countryiso3code")
+                if not country_iso3 or country_iso3 not in result:
+                    continue
                 date = item.get("date")
                 if not date or not date.isdigit():
                     continue
                 year = int(date)
                 if year not in TARGET_YEARS:
                     continue
-                per_year[year][feature_name] = item.get("value")
-        result[country_iso3] = dict(per_year)
+                country_year = result[country_iso3].setdefault(year, {})
+                country_year[feature_name] = item.get("value")
     return result
+
+
+def enrich_trade_rows_with_country_reference(
+    trade_rows: list[TradeRow],
+    *,
+    iso3_by_numeric: dict[str, str],
+    name_by_iso3: dict[str, str],
+) -> list[TradeRow]:
+    enriched: list[TradeRow] = []
+    for row in trade_rows:
+        partner_code = row.partner.strip()
+        resolved_iso3 = row.partner_iso3
+        resolved_name = row.partner
+        if partner_code in iso3_by_numeric:
+            resolved_iso3 = iso3_by_numeric[partner_code]
+            resolved_name = name_by_iso3.get(resolved_iso3, resolved_iso3)
+        elif partner_code == "0":
+            resolved_iso3 = "WLD"
+            resolved_name = "World"
+
+        enriched.append(
+            TradeRow(
+                year=row.year,
+                reporter_iso3=row.reporter_iso3,
+                reporter=row.reporter,
+                partner_iso3=resolved_iso3,
+                partner=resolved_name,
+                cmd_code=row.cmd_code,
+                cmd_desc=row.cmd_desc,
+                trade_value_usd=row.trade_value_usd,
+                net_weight_kg=row.net_weight_kg,
+                quantity=row.quantity,
+                qty_unit=row.qty_unit,
+            )
+        )
+    return enriched
 
 
 def summarize_export_base(trade_rows: list[TradeRow]) -> list[dict[str, object]]:
@@ -357,7 +526,7 @@ def summarize_export_base(trade_rows: list[TradeRow]) -> list[dict[str, object]]
         summary.append(
             {
                 "cmd_code": item["cmd_code"],
-                "cmd_desc": item["cmd_desc"],
+                "cmd_desc": HS6_REFERENCE_LABELS.get(str(item["cmd_code"]), item["cmd_desc"]),
                 "trade_value_usd": trade_value,
                 "partner_count": len(item["partners"]),
                 "year_count": len(item["years"]),
@@ -396,12 +565,18 @@ def build_recommendations(
         if base is None:
             continue
 
-        if upgrade_code in summary_by_code:
-            continue
+        existing_upgrade = summary_by_code.get(upgrade_code)
 
         stage_gap = float(path["stage_gap"])
         value_multiplier = float(path["value_multiplier"])
         base_trade_value = float(base["trade_value_usd"])
+        existing_upgrade_value = float(existing_upgrade["trade_value_usd"]) if existing_upgrade is not None else 0.0
+        development_ratio = existing_upgrade_value / base_trade_value if base_trade_value > 0 else 0.0
+
+        # Skip only when the downstream product is already strongly established.
+        if existing_upgrade is not None and development_ratio >= 0.35:
+            continue
+
         source_rows = partner_rows_by_code[base_code]
         partner_scores = []
         aggregated_partner_rows: dict[str, dict[str, object]] = {}
@@ -461,7 +636,13 @@ def build_recommendations(
         top_partners = partner_scores[:5]
         average_partner_score = sum(item["partner_score"] for item in top_partners) / len(top_partners) if top_partners else 0.0
 
-        convertible_share = 0.12 if stage_gap <= 1 else 0.08
+        if existing_upgrade is None:
+            development_status = "new_export_opportunity"
+            convertible_share = 0.12 if stage_gap <= 1 else 0.08
+        else:
+            development_status = "underdeveloped_export"
+            convertible_share = 0.08 if stage_gap <= 1 else 0.05
+
         export_uplift_usd = base_trade_value * convertible_share * (value_multiplier - 1.0)
         gdp_uplift_pct = (export_uplift_usd / latest_kaz_gdp * 100.0) if latest_kaz_gdp else None
         opportunity_score = (
@@ -469,6 +650,7 @@ def build_recommendations(
             + average_partner_score * 0.28
             + value_multiplier * 0.20
             + (2.5 - stage_gap) * 0.10
+            + (1.0 - min(development_ratio, 1.0)) * 0.12
         )
 
         recs.append(
@@ -477,8 +659,11 @@ def build_recommendations(
                 "base_label": path["base_label"],
                 "upgrade_hs6": upgrade_code,
                 "upgrade_label": path["upgrade_label"],
+                "development_status": development_status,
                 "processing_family": path["processing_family"],
                 "base_export_value_usd_2020_2025": round(base_trade_value, 2),
+                "current_upgrade_export_value_usd_2020_2025": round(existing_upgrade_value, 2),
+                "current_upgrade_to_base_ratio": round(development_ratio, 6),
                 "base_partner_count": base["partner_count"],
                 "base_avg_unit_value_usd_per_kg": base["avg_unit_value_usd_per_kg"],
                 "value_multiplier_assumption": value_multiplier,
@@ -490,6 +675,8 @@ def build_recommendations(
                 "short_conclusion": (
                     f"Moving from {base_code} to {upgrade_code} looks realistic given "
                     f"Kazakhstan's existing export base and current partner mix."
+                    if existing_upgrade is None
+                    else f"{upgrade_code} is already exported, but still looks underdeveloped relative to {base_code}."
                 ),
             }
         )
@@ -547,44 +734,46 @@ def render_charts(
     recommendations: list[dict[str, object]],
     charts_dir: Path,
 ) -> None:
+    import matplotlib.pyplot as plt
+
     charts_dir.mkdir(parents=True, exist_ok=True)
 
-    top_exports = export_base_rows[:10]
+    top_exports = export_base_rows[:TOP_EXPORT_CHART_COUNT]
     if top_exports:
-        plt.figure(figsize=(11, 6))
+        plt.figure(figsize=(14, 8))
         labels = [_wrap_label(str(row["cmd_code"]), str(row["cmd_desc"])) for row in top_exports]
         values = [float(row["trade_value_usd"]) / 1_000_000 for row in top_exports]
         plt.bar(labels, values, color="#1f77b4")
-        plt.title("Kazakhstan top HS6 exports, 2020-2025")
+        plt.title("Kazakhstan top HS6 exports, 2024")
         plt.ylabel("USD million")
         plt.xlabel("HS6 product")
-        plt.xticks(rotation=0, fontsize=8)
+        plt.xticks(rotation=35, ha="right", fontsize=8)
         plt.tight_layout()
         plt.savefig(charts_dir / "top_exports.png", dpi=160)
         plt.close()
 
-    top_recs = recommendations[:8]
+    top_recs = recommendations[:TOP_RECOMMENDATION_CHART_COUNT]
     if top_recs:
-        plt.figure(figsize=(11, 6))
+        plt.figure(figsize=(14, 8))
         labels = [_wrap_label(str(row["upgrade_hs6"]), str(row["upgrade_label"])) for row in top_recs]
         values = [float(row["estimated_export_uplift_usd"]) / 1_000_000 for row in top_recs]
         plt.bar(labels, values, color="#ff7f0e")
         plt.title("Estimated export uplift by recommended HS6 upgrade")
         plt.ylabel("USD million")
         plt.xlabel("Recommended upgrade")
-        plt.xticks(rotation=0, fontsize=8)
+        plt.xticks(rotation=35, ha="right", fontsize=8)
         plt.tight_layout()
         plt.savefig(charts_dir / "estimated_export_uplift.png", dpi=160)
         plt.close()
 
-        plt.figure(figsize=(11, 6))
+        plt.figure(figsize=(14, 8))
         labels = [_wrap_label(str(row["upgrade_hs6"]), str(row["upgrade_label"])) for row in top_recs]
         values = [float(row["estimated_gdp_uplift_pct"] or 0.0) for row in top_recs]
         plt.bar(labels, values, color="#2ca02c")
         plt.title("Estimated Kazakhstan GDP uplift by recommended HS6 upgrade")
         plt.ylabel("GDP uplift, %")
         plt.xlabel("Recommended upgrade")
-        plt.xticks(rotation=0, fontsize=8)
+        plt.xticks(rotation=35, ha="right", fontsize=8)
         plt.tight_layout()
         plt.savefig(charts_dir / "estimated_gdp_uplift_pct.png", dpi=160)
         plt.close()
@@ -593,7 +782,7 @@ def render_charts(
         scenario_names = ["conservative", "base", "optimistic"]
         x_positions = list(range(len(top_recs)))
         width = 0.24
-        plt.figure(figsize=(13, 7))
+        plt.figure(figsize=(15, 8))
         for offset, scenario_name in enumerate(scenario_names):
             scenario_values = [
                 next(
@@ -609,6 +798,8 @@ def render_charts(
         plt.xticks(
             x_positions,
             [_wrap_label(str(row["upgrade_hs6"]), str(row["upgrade_label"])) for row in top_recs],
+            rotation=35,
+            ha="right",
             fontsize=8,
         )
         plt.ylabel("Predicted GDP growth uplift, %")

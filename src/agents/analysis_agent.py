@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from agents.types import MultiAgentState
-from mvp_data_pipeline import build_gdp_scenarios, build_recommendations
+from trade_pipeline import build_gdp_scenarios, build_recommendations
 
 
 class OpportunityAnalysisAgent:

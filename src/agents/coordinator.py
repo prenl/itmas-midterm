@@ -7,7 +7,11 @@ from agents.critic_agent import CriticAgent
 from agents.data_agent import DataAcquisitionAgent
 from agents.explanation_agent import EconomicExplanationAgent
 from agents.types import MultiAgentState
-from mvp_data_pipeline import ensure_output_dirs, render_charts, write_csv
+from trade_pipeline import (
+    ensure_output_dirs,
+    render_charts,
+    write_csv,
+)
 
 
 def _write_markdown_summary(state: MultiAgentState) -> None:
@@ -62,6 +66,7 @@ class MultiAgentCoordinator:
         *,
         comtrade_dir: Path,
         gravity_file: Path,
+        gravity_countries_file: Path,
         upgrade_paths_file: Path,
         output_dir: Path,
     ) -> MultiAgentState:
@@ -69,6 +74,7 @@ class MultiAgentCoordinator:
         state = MultiAgentState(
             comtrade_dir=comtrade_dir,
             gravity_file=gravity_file,
+            gravity_countries_file=gravity_countries_file,
             upgrade_paths_file=upgrade_paths_file,
             output_dir=output_dir,
             csv_dir=csv_dir,

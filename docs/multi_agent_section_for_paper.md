@@ -37,7 +37,7 @@ For a scientific or academic setting, this architecture is especially useful bec
 
 ## 3. Agent Roles
 
-The implemented MVP includes four specialized agents and one coordinator.
+The final implementation includes four specialized agents and one coordinator.
 
 ### 3.1 Data Acquisition Agent
 
@@ -303,5 +303,4 @@ The most promising future extensions are:
 4. introduce a negotiation or voting mechanism between agents;
 5. enable parallel agent execution and asynchronous coordination.
 
-These directions would move the system from a structured analytical multi-agent MVP toward a more advanced intelligent multi-agent platform.
-
+These directions would move the system from the current structured analytical multi-agent implementation toward a more advanced intelligent multi-agent platform.

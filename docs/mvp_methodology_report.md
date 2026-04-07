@@ -1,4 +1,4 @@
-# Kazakhstan Export Upgrade MVP: Methodology Report
+# Kazakhstan Export Upgrade Multi-Agent System: Methodology Report
 
 ## 1. Project Goal
 
@@ -43,17 +43,17 @@ Purpose:
 - measure export value by product and destination;
 - determine the base products from which downstream upgrades can be proposed.
 
-MVP scope:
+Current real-data MVP scope:
 
 - reporter: `Kazakhstan`
 - flow: `exports`
 - product classification: `HS6`
 - frequency: `annual`
-- years: `2020-2025`
+- year: `2024`
 
 Current implementation:
 
-- the pipeline supports importing `CSV`, `parquet`, and `pq` files from `data/comtrade/`;
+- the pipeline supports importing `CSV`, `parquet`, `pq`, and gzipped UN Comtrade text files from `data/comtrade/`;
 - this was chosen because the public Comtrade frontend uses a SPA-based access pattern and direct stable API routing was not fully finalized during MVP implementation;
 - the architecture is prepared for future direct API integration.
 
@@ -157,17 +157,14 @@ Main implementation files:
 - `src/upgrade_recommender.py`
   Encodes product-upgrade logic for downstream recommendations.
 
-- `src/mvp_data_pipeline.py`
-  Main MVP pipeline for data loading, joining, scoring, CSV export, and chart rendering.
-
-- `src/run_mvp.py`
-  Entry point for the Kazakhstan export-upgrade MVP run.
+- `src/trade_pipeline.py`
+  Main shared pipeline for data loading, joining, scoring, CSV export, and chart rendering.
 
 - `src/agents/`
   Multi-agent modules for acquisition, analysis, explanation, critique, and coordination.
 
 - `src/run_multi_agent.py`
-  Entry point for the multi-agent version of the MVP.
+  Main entry point for the final multi-agent run.
 
 Supporting data files:
 
@@ -179,8 +176,8 @@ Supporting data files:
 
 Generated outputs:
 
-- `outputs/mvp/csv/`
-- `outputs/mvp/charts/`
+- `outputs/multi_agent_*/csv/`
+- `outputs/multi_agent_*/charts/`
 
 ## 6. Analytical Pipeline
 
@@ -216,14 +213,14 @@ The raw trade rows are aggregated into a Kazakhstan export base summary by `HS6`
 
 For each product, the pipeline computes:
 
-- total export value over `2020-2025`
+- total export value in the selected analytical window
 - number of partner countries
 - number of active years
 - approximate average unit value
 
 This summary is saved to:
 
-- `outputs/mvp/csv/kaz_export_base.csv`
+- `outputs/multi_agent_2024_hs6_underdeveloped/csv/kaz_export_base.csv`
 
 ### 6.3 Product Upgrade Mapping
 
@@ -241,6 +238,13 @@ Each row describes:
 
 This is a domain-driven layer added on top of trade data. It is important because pure trade data alone does not explicitly encode “processing upgrade” relationships.
 
+In the final MVP configuration, the recommendation layer supports two cases:
+
+- `new export opportunity`
+- `underdeveloped downstream export`
+
+The second case is critical for real Kazakhstan data because many downstream products already exist in exports, but only at a much smaller scale than the corresponding upstream goods.
+
 ### 6.4 Partner-Market Scoring
 
 For each base product exported by Kazakhstan, the pipeline evaluates partner markets using:
@@ -256,7 +260,7 @@ The result is a ranked list of likely target markets for each recommended upgrad
 
 This output is saved to:
 
-- `outputs/mvp/csv/upgrade_partner_targets.csv`
+- `outputs/multi_agent_2024_hs6_underdeveloped/csv/upgrade_partner_targets.csv`
 
 ### 6.5 Upgrade Recommendation Scoring
 
@@ -271,7 +275,7 @@ The score combines:
 
 This output is saved to:
 
-- `outputs/mvp/csv/upgrade_recommendations.csv`
+- `outputs/multi_agent_2024_hs6_underdeveloped/csv/upgrade_recommendations.csv`
 
 ### 6.6 GDP Uplift Scenarios
 
@@ -288,7 +292,7 @@ The scenario logic is:
 
 This output is saved to:
 
-- `outputs/mvp/csv/gdp_growth_scenarios.csv`
+- `outputs/multi_agent_2024_hs6_underdeveloped/csv/gdp_growth_scenarios.csv`
 
 ### 6.7 Multi-Agent Orchestration
 
@@ -491,7 +495,7 @@ This is appropriate for a focused case study, but it is not yet a full global re
 The MVP can be reproduced by running:
 
 ```bash
-conda run --no-capture-output -n itmas_midterm python src/run_mvp.py
+conda run --no-capture-output -n itmas_midterm python src/run_multi_agent.py
 ```
 
 Input assumptions:

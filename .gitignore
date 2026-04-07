@@ -2,3 +2,6 @@
 *.db
 outputs
 Gravity_csv_V202211
+.DS_Store
+*/.DS_Store
+**/*.pyc

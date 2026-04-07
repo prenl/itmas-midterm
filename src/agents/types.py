@@ -3,13 +3,14 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from mvp_data_pipeline import TradeRow
+from trade_pipeline import TradeRow
 
 
 @dataclass
 class MultiAgentState:
     comtrade_dir: Path
     gravity_file: Path
+    gravity_countries_file: Path
     upgrade_paths_file: Path
     output_dir: Path
     csv_dir: Path
